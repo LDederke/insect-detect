@@ -40,10 +40,10 @@ This Python script does the following:
 based on open source scripts available at https://github.com/luxonis
 
 With additional funktions added by Liam Dederke
-- Recording of fullsize images as an additional option with selectable interval between 1 and 721 minutes (default 30 min)
-- protection against overheating of camera and Pi based on chip temperatures and manufacturer's specifications
-- optional argument to trigger an action on new ID's. a 0.1 second pulse is sent over GPIO pin 17, 
-    which can be used for example to perform an action with a second Pi.
+- Recording of fullsize images as an additional option in a selectable interval between 1 and 721 minutes (default 30 min)
+- Protection against overheating of camera and Pi based on chip temperatures and manufacturers specifications
+- Optional argument to trigger an action for new IDs. A 0.1 second pulse is sent over GPIO pin 17, 
+    which can be used to perform an action with a second Pi.
 '''
 
 import argparse
@@ -89,11 +89,11 @@ parser.add_argument("-log", "--save_logs", action="store_true",
     help="save RPi CPU + OAK chip temperature and RPi available memory (MB) + \
           CPU utilization (%) to .csv file")
 parser.add_argument("-trigger", "--trigger_action", action="store_true",
-    help="sends a 0.1 sec long signal vio GPIO Pin 17 with every new ID to trigger an external action")
-parser.add_argument("-fullsize", "--fullsizepictures", action="store_true",
+    help="sends a 0.1 sec long puls via GPIO pin 17 for every new ID to trigger an external action")
+parser.add_argument("-fullsize", "--fullsize_pictures", action="store_true",
     help="take fullsize pictures")         
 parser.add_argument("-fullsizeint", "--min_fullsize_interval", type=int, choices=range(1, 721), default=30,
-    help="set an intervall for fullsize pictures in min")      
+    help="set an interval for fullsize pictures in min")      
 
 args = parser.parse_args()
 
@@ -301,12 +301,12 @@ def store_data(frame, tracks):
             # Don't save cropped detections if tracking status == "NEW" or "LOST" or "REMOVED"
             if track.status.name == "TRACKED":
                 feature_id = track.id
-                if feature_id not in ID_trigger_list and args.trigger_action: #Trigger an action for new ID´s
+                if feature_id not in ID_trigger_list and args.trigger_action: #Trigger an action for new IDs
                     # Trigger your action here
                     pulse_thread = threading.Thread(target=pulse, args=(pin,))
                     pulse_thread.start()
 
-                    # Save the new ID to the list
+                    # Save the new IDs to the list
                     ID_trigger_list.append(feature_id)
 
                 # Save detections cropped from HQ frame to .jpg
@@ -415,7 +415,7 @@ def save_logs():
         log_info_file.flush()
 
 def overheating(): 
-    """Shut down while overheating. The the Pi's temperature  is only available if -log is enabled"""
+    """Shut down in case of overheating. The Pis temperature  is only available if -log is enabled"""
     try:
         temperatur_oak = round(device.getChipTemperature().average)
     except RuntimeError:
@@ -430,13 +430,13 @@ def overheating():
         if args.trigger_action:
             GPIO.cleanup()
 
-        logger.info(f"Recording {rec_id} shutdown while overheating\n")
+        logger.info(f"Recording {rec_id} shutdown in case of overheating\n")
 
         subprocess.run(["sudo", "shutdown", "-h", "now"], check=True)
         time.sleep(500)
 
 if args.fullsizeintervall:
-    Path(f"{save_path}/fullsize").mkdir(parents=True, exist_ok=True) #Set Path to save fullsize pictures
+    Path(f"{save_path}/fullsize").mkdir(parents=True, exist_ok=True) #Set path to save fullsize pictures
 
     def fullsizepic():  
         """Take fullsize pictures"""
@@ -491,7 +491,7 @@ with dai.Device(pipeline, maxUsbSpeed=dai.UsbSpeed.HIGH) as device:
             # Wait for 1 second
             time.sleep(1)
 
-            overheating() #Check teperature
+            overheating() #Check for overheating
 
             #Take fullsize pictures and set new time
             if args.fullsizeintervall:
@@ -503,7 +503,7 @@ with dai.Device(pipeline, maxUsbSpeed=dai.UsbSpeed.HIGH) as device:
         logger.info(f"Recording {rec_id} finished\n")
         record_log()
 
-        if args.trigger_action: #Send a final puls after the rec_time has expired to turne off the other device
+        if args.trigger_action: #Send a final puls after the rec_time has expired to turn off the other device
             time.sleep(300)
 
         
