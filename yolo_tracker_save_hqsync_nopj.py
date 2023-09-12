@@ -38,6 +38,12 @@ This Python script does the following:
          CPU utilization (%) to "info_log_{timestamp}.csv"
 
 based on open source scripts available at https://github.com/luxonis
+
+With additional funktions added by Liam Dederke
+- Recording of fullsize images as an additional option with selectable interval between 1 and 721 minutes (default 30 min)
+- protection against overheating of camera and Pi based on chip temperatures and manufacturer's specifications
+- optional argument to trigger an action on new ID's. a 0.1 second pulse is sent over GPIO pin 17, 
+    which can be used for example to perform an action with a second Pi.
 '''
 
 import argparse
@@ -82,7 +88,30 @@ parser.add_argument("-overlay", "--save_overlay_frames", action="store_true",
 parser.add_argument("-log", "--save_logs", action="store_true",
     help="save RPi CPU + OAK chip temperature and RPi available memory (MB) + \
           CPU utilization (%) to .csv file")
+parser.add_argument("-trigger", "--trigger_action", action="store_true",
+    help="sends a 0.1 sec long signal vio GPIO Pin 17 with every new ID to trigger an external action")
+parser.add_argument("-fullsize", "--fullsizepictures", action="store_true",
+    help="take fullsize pictures")         
+parser.add_argument("-fullsizeint", "--min_fullsize_interval", type=int, choices=range(1, 721), default=30,
+    help="set an intervall for fullsize pictures in min")      
+
 args = parser.parse_args()
+
+if args.trigger_action: #Prepair GPIO-settings for triggersignal
+    import RPi.GPIO as GOPI
+    import threading
+
+    # Set the GPIO mode and number
+    GPIO.setmode(GPIO.BCM)
+    pin = 17
+
+    # Set up the GPIO pin as an output
+    GPIO.setup(pin, GPIO.OUT)
+
+    # Specify the time the GPIO Pin stays high
+    Time_on = 0.1  # Change this to the desired duration
+
+ID_trigger_list = []  # Creature an emty list of IDs to find new IDs while trigger an action
 
 if args.save_logs:
     from apscheduler.schedulers.background import BackgroundScheduler
@@ -217,6 +246,13 @@ def frame_norm(frame, bbox):
     norm_vals[::2] = frame.shape[1]
     return (np.clip(np.array(bbox), 0, 1) * norm_vals).astype(int)
 
+if args.trigger_action: 
+    def pulse(pin):
+        """Defines the pulse to be sent via GPIO"""
+        GPIO.output(pin, GPIO.HIGH)  # Set the pin state to HIGH
+        time.sleep(Time_on)  # Wait for x seconds
+        GPIO.output(pin, GPIO.LOW)  # Set the pin state to LOW
+
 def make_bbox_square(bbox):
     """Increase bbox size on both sides of the minimum dimension, or only on one side if localized at frame margin."""
     bbox_width = bbox[2] - bbox[0]
@@ -244,6 +280,7 @@ def make_bbox_square(bbox):
 
 def store_data(frame, tracks):
     """Save cropped detections (+ full HQ frames) to .jpg and tracker output to metadata .csv."""
+    global ID_trigger_list
     with open(f"{save_path}/metadata_{rec_start}.csv", "a", encoding="utf-8") as metadata_file:
         metadata = csv.DictWriter(metadata_file, fieldnames=
             ["rec_ID", "timestamp", "label", "confidence", "track_ID",
@@ -263,6 +300,14 @@ def store_data(frame, tracks):
         for track in tracks:
             # Don't save cropped detections if tracking status == "NEW" or "LOST" or "REMOVED"
             if track.status.name == "TRACKED":
+                feature_id = track.id
+                if feature_id not in ID_trigger_list and args.trigger_action: #Trigger an action for new ID´s
+                    # Trigger your action here
+                    pulse_thread = threading.Thread(target=pulse, args=(pin,))
+                    pulse_thread.start()
+
+                    # Save the new ID to the list
+                    ID_trigger_list.append(feature_id)
 
                 # Save detections cropped from HQ frame to .jpg
                 bbox = frame_norm(frame, (track.srcImgDetection.xmin, track.srcImgDetection.ymin,
@@ -369,6 +414,39 @@ def save_logs():
         log_info.writerow(logs_info)
         log_info_file.flush()
 
+def overheating(): 
+    """Shut down while overheating. The the Pi's temperature  is only available if -log is enabled"""
+    try:
+        temperatur_oak = round(device.getChipTemperature().average)
+    except RuntimeError:
+        temperatur_oak = 0
+
+    try:
+        temperatur_pi = round(CPUTemperature().temperature)
+    except RuntimeError:
+        temperatur_pi = 0
+
+    if temperatur_oak > 103 or temperatur_pi > 83:
+        if args.trigger_action:
+            GPIO.cleanup()
+
+        logger.info(f"Recording {rec_id} shutdown while overheating\n")
+
+        subprocess.run(["sudo", "shutdown", "-h", "now"], check=True)
+        time.sleep(500)
+
+if args.fullsizeintervall:
+    Path(f"{save_path}/fullsize").mkdir(parents=True, exist_ok=True) #Set Path to save fullsize pictures
+
+    def fullsizepic():  
+        """Take fullsize pictures"""
+        global frame
+        if q_frame.has():
+            frame = q_frame.get().getCvFrame()
+        timestamp = datetime.now().strftime("%Y%m%d_%H-%M-%S.%f")
+        raw_path = f"{save_path}/fullsize/{timestamp}_raw.jpg"
+        cv2.imwrite(raw_path, frame)
+
 # Connect to OAK device and start pipeline in USB2 mode
 with dai.Device(pipeline, maxUsbSpeed=dai.UsbSpeed.HIGH) as device:
 
@@ -392,6 +470,10 @@ with dai.Device(pipeline, maxUsbSpeed=dai.UsbSpeed.HIGH) as device:
     # Set start time of recording
     start_time = time.monotonic()
 
+    # Creature a time_intervall variable for the intervall of fullsize pictures
+    time_intervall = args.min_fullsize_interval * 60
+    nextfullsizepic = time.monotonic()
+
     try:
         # Record until recording time is finished
         while time.monotonic() < start_time + rec_time:
@@ -409,9 +491,28 @@ with dai.Device(pipeline, maxUsbSpeed=dai.UsbSpeed.HIGH) as device:
             # Wait for 1 second
             time.sleep(1)
 
+            overheating() #Check teperature
+
+            #Take fullsize pictures and set new time
+            if args.fullsizeintervall:
+                if time.monotonic() > nextfullsizepic:
+                    fullsizepic()
+                    nextfullsizepic = nextfullsizepic + time_intervall
+
         # Write info on end of recording to log file and write record logs to .csv
         logger.info(f"Recording {rec_id} finished\n")
         record_log()
+
+        if args.trigger_action: #Send a final puls after the rec_time has expired to turne off the other device
+            time.sleep(300)
+
+        
+            pulse_thread = threading.Thread(target=pulse, args=(pin,))
+            pulse_thread.start()
+            print("final Puls sended")
+
+            
+            GPIO.cleanup()
 
         # Shutdown Raspberry Pi
         subprocess.run(["sudo", "shutdown", "-h", "now"], check=True)
@@ -421,6 +522,9 @@ with dai.Device(pipeline, maxUsbSpeed=dai.UsbSpeed.HIGH) as device:
         logger.error(traceback.format_exc())
         logger.error(f"Error during recording {rec_id}\n")
         record_log()
+
+        if args.trigger_action:
+            GPIO.cleanup()
 
         # Shutdown Raspberry Pi
         subprocess.run(["sudo", "shutdown", "-h", "now"], check=True)
